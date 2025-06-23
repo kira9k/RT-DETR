@@ -9,7 +9,6 @@ class ConvLevel(nn.Module):
         self.channels = channels
         self.level = level
 
-        # 1xH сверточный слой
         self.conv = nn.Conv2d(in_channels=channels,
                               out_channels=channels,
                               kernel_size=(height, 1),
@@ -21,6 +20,7 @@ class ConvLevel(nn.Module):
             self.conv.weight.zero_()
             for c in range(channels):
                 self.conv.weight[c, c, level, 0] = 1.0
+        self.conv.weight.requires_grad_(False)
 
     def forward(self, input):
         B, C, L, H, W, _ = input.shape
@@ -31,3 +31,24 @@ class ConvLevel(nn.Module):
         x = x.reshape(-1, L, C, W).permute(0, 2, 1, 3)
         x = x.reshape(2, B, C, L, W).permute(1, 2, 3, 4, 0)  # (B, C, L, W, 2)
         return x
+
+
+class FixedSumMatmul(nn.Module):
+
+    def __init__(self, feature_dim=9):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.ones = nn.Parameter(torch.ones(feature_dim, 1),
+                                 requires_grad=False)
+
+    def forward(self, x):
+        """
+        x: [batch, channels, seq_len, features]
+        output: [batch, channels, seq_len]
+        """
+        batch, channels, seq_len, features = x.shape
+        assert features == self.feature_dim, f"Expected features={self.feature_dim}, got {features}"
+        out = torch.matmul(x, self.ones)
+        output = out.reshape(batch, channels, seq_len)
+
+        return output

@@ -7,8 +7,11 @@
     - [Tile | /model/decoder/Tile | Layer type not supported by TIDL|](#tile--modeldecodertile--layer-type-not-supported-by-tidl)
     - [GatherElements | /model/decoder/GatherElements | Layer type not supported by TIDL](#gatherelements--modeldecodergatherelements--layer-type-not-supported-by-tidl)
     - [Gather | model/decoder/decoder/layers.0/cross_attn/Gather](#gather--modeldecoderdecoderlayers0cross_attngather)
+    - [ReduceSum | /model/decoder/layers.2/cross_attn/ReduceSum](#reducesum--modeldecoderlayers2cross_attnreducesum)
 - [Ошибки во время компиляции](#ошибки-во-время-компиляции)
     - [Исправление бэкбона](#исправление-бэкбона)
+- [Долгая компиляция](#долгая-компиляция)
+    - [Выносим функцию ```_generate_anchors()``` вне модели](#выносим-функцию-_generate_anchors-вне-модели)
 
 ## TIDl не поддерживает динамические оси
 
@@ -142,11 +145,64 @@ class ConvLevel(nn.Module):
         x = x.reshape(2, B, C, L, W).permute(1, 2, 3, 4, 0)  # (B, C, L, W, 2)
         return x
 ```
+Инициализация сверток происходит в классе ```MSDeformableAttention```:
+```python
+self.conv_level0 = ConvLevel(channels=300, height=3, level=0)
+self.conv_level1 = ConvLevel(channels=300, height=3, level=1)
+self.conv_level2 = ConvLevel(channels=300, height=3, level=2)
+```
 
-Таким образом, передаем в функцию свертки для каждого ```level``` и вместо извлечения по индексу запишем так:
+Далее создаем список из данных сверток:
+```python
+lst_conv = [self.conv_level0, self.conv_level1, self.conv_level2]
+```
+и передаем в качестве параметра в функцию ```self.ms_deformable_attn_core```. Таким образом, в данной функции свертки вызываются для каждого ```level``` и вместо извлечения по индексу записаны так:
 
 ```python
 sampling_grid_l_ = lst_conv[level](sampling_grids).permute(0, 2, 1, 3, 4).flatten(0, 1)
+```
+
+### ReduceSum | /model/decoder/layers.2/cross_attn/ReduceSum
+
+Данная ошибка возникает в файле ```utils.py``` в строчке
+```python
+output = (torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights).sum(-1).reshape(bs, n_head * c, Len_q)
+```
+
+из-за операции ```sum(-1)```. Для замены создадим класс, который на вход принимает ```(torch.stack(sampling_value_list, dim=-2).flatten(-2) * attention_weights)``` и реализует суммирование по последней оси с помощью матричного умножения. Класс представлен в файле ```conv_layer.py``` и показан ниже 
+
+```python
+class FixedSumMatmul(nn.Module):
+
+    def __init__(self, feature_dim=9):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.ones = nn.Parameter(torch.ones(feature_dim, 1),
+                                 requires_grad=False)
+
+    def forward(self, x):
+        """
+        x: [batch, channels, seq_len, features]
+        output: [batch, channels, seq_len]
+        """
+        batch, channels, seq_len, features = x.shape
+        assert features == self.feature_dim, f"Expected features={self.feature_dim}, got {features}"
+        out = torch.matmul(x, self.ones)
+        output = out.reshape(batch, channels, seq_len)
+
+        return output
+```
+
+Таким образом, реализация выглядит так: в классе ```MSDeformableAttention``` инициализируем модель 
+
+```python
+self.fixed_sum_matmul = FixedSumMatmul(feature_dim=9)
+```
+и передаем её в качестве параметра в функцию ```self.ms_deformable_attn_core```. В данной функции реализация выглядит так: 
+
+```python
+weighted = torch.stack(sampling_value_list,dim=-2).flatten(-2) * attention_weights
+output = fixed_sum_matmul(weighted).reshape(bs, n_head * c, Len_q)
 ```
 
 ## Ошибки во время компиляции
@@ -159,3 +215,37 @@ sampling_grid_l_ = lst_conv[level](sampling_grids).permute(0, 2, 1, 3, 4).flatte
 
 В RTDETR в качестве бэкбона используется PResnet18. Он имеет слои пулинга с параметром ```seil_mode=True```. Для исправления нужно заменить значение ```True``` на ```False```
  
+
+## Долгая компиляция
+
+При всех исправлениях компиляция занимает достаточно много времени, что возникает, скорее всего, из-за неправльной обработке некоторых слоев TIDL-ом.
+
+### Выносим функцию ```_generate_anchors()``` вне модели
+
+Для ускорения компиляции было принято вынести генерацию якорей за модель, и подавать на вход декодера ```anchors``` и ```valid_mask```
+
+```python
+class Model(nn.Module):
+
+    def __init__(self):
+        super(Model, self).__init__()
+        self.backbone = model_fpn
+        self.encoder = model_enc
+        self.decoder = model_transformer_decoder
+
+    def forward(self, x, anchors, valid_mask):
+        feats = self.backbone(x)
+        print(f"Backbone output: {[f.shape for f in feats]}")
+        enc = self.encoder(feats)
+        print(f"Enc output: {[f.shape for f in enc]}")
+        x = self.decoder(enc, anchors=anchors, valid_mask=valid_mask)
+        return x
+```
+
+Для этого в методе ```_get_decoder_input()``` и ```forward()``` класса ```RTDETRTranformer``` надо добавить 2 аргумента - ```anchors``` и ```valid_mask``` и переопределить переменные в функции ```_get_decoder_input()```
+
+```python
+anchors, valid_mask = anchors, valid_mask
+```
+
+

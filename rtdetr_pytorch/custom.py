@@ -41,6 +41,7 @@ def generate_anchors(spatial_shapes=None,
 
 
 anchors, valid_mask = generate_anchors()
+print(anchors.shape, valid_mask.shape)
 model_fpn = PResNet(depth=18,
                     variant='d',
                     num_stages=4,
@@ -88,11 +89,9 @@ model_transformer_decoder = RTDETRTransformer(num_classes=1,
                                               eval_idx=-1,
                                               eps=1e-2,
                                               aux_loss=True)
-#anchors=anchors,
-#valid_mask=valid_mask)
 
 data = torch.rand(1, 3, 640, 640, dtype=torch.float32)
-size = torch.tensor([[640., 640.]])
+#size = torch.tensor([[640., 640.]])
 
 
 class Model(nn.Module):
@@ -103,12 +102,12 @@ class Model(nn.Module):
         self.encoder = model_enc
         self.decoder = model_transformer_decoder
 
-    def forward(self, x):
-        feats = self.backbone(x)  # Получаем признаки из бэкбона
+    def forward(self, x, anchors, valid_mask):
+        feats = self.backbone(x)
         print(f"Backbone output: {[f.shape for f in feats]}")
-        enc = self.encoder(feats)  # Передаем в энкодер
+        enc = self.encoder(feats)
         print(f"Enc output: {[f.shape for f in enc]}")
-        x = self.decoder(enc)
+        x = self.decoder(enc, anchors=anchors, valid_mask=valid_mask)
         return x
 
 
@@ -122,9 +121,10 @@ data = torch.rand(1, 3, 640, 640)
 with torch.no_grad():
     torch.onnx.export(
         model,
-        (data),
+        (data, anchors, valid_mask),
         'model.onnx',
-        input_names=['images'],  # Имена для всех входов
+        input_names=['images', 'anchors',
+                     'valid_mask'],  # Имена для всех входов
         output_names=['labels', 'boxes'],  # Имена выходов
         opset_version=16,  # Для широкой совместимости
         do_constant_folding=True,

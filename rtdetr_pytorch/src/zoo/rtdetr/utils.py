@@ -14,7 +14,7 @@ def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
 
 def deformable_attention_core_func(value, value_spatial_shapes,
                                    sampling_locations, attention_weights,
-                                   lst_conv):
+                                   lst_conv, fixed_sum_matmul):
     """
     Args:
         value (Tensor): [bs, value_length, n_head, c]
@@ -34,8 +34,6 @@ def deformable_attention_core_func(value, value_spatial_shapes,
     sampling_grids = 2 * sampling_locations - 1
     sampling_value_list = []
     for level, (h, w) in enumerate(value_spatial_shapes):
-        print(sampling_grids.shape)
-        print(level)
         # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
         value_l_ = value_list[level].flatten(2).permute(0, 2, 1).reshape(
             bs * n_head, c, h, w)
@@ -58,9 +56,14 @@ def deformable_attention_core_func(value, value_spatial_shapes,
     # (N_, Lq_, M_, L_, P_) -> (N_, M_, Lq_, L_, P_) -> (N_*M_, 1, Lq_, L_*P_)
     attention_weights = attention_weights.permute(0, 2, 1, 3, 4).reshape(
         bs * n_head, 1, Len_q, n_levels * n_points)
-    output = (torch.stack(sampling_value_list, dim=-2).flatten(-2) *
-              attention_weights).sum(-1).reshape(bs, n_head * c, Len_q)
-
+    ###was###
+    #output = (torch.stack(sampling_value_list, dim=-2).flatten(-2) *
+    #          attention_weights).sum(-1).reshape(bs, n_head * c, Len_q)
+    ###now###
+    weighted = torch.stack(sampling_value_list,
+                           dim=-2).flatten(-2) * attention_weights
+    output = fixed_sum_matmul(weighted).reshape(bs, n_head * c, Len_q)
+    ###end###
     return output.permute(0, 2, 1)
 
 

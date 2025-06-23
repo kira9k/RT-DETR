@@ -13,7 +13,7 @@ import torch.nn.init as init
 from .denoising import get_contrastive_denoising_training_group
 from .utils import deformable_attention_core_func, get_activation, inverse_sigmoid
 from .utils import bias_init_with_prob
-from .conv_layer import ConvLevel
+from .conv_layer import ConvLevel, FixedSumMatmul
 
 from src.core import register
 
@@ -103,10 +103,12 @@ class MSDeformableAttention(nn.Module):
         # self.conv.weight.requires_grad_(False)
         #############################################################
 
+        ###add for deformable_attn###
         self.conv_level0 = ConvLevel(channels=300, height=3, level=0)
         self.conv_level1 = ConvLevel(channels=300, height=3, level=1)
         self.conv_level2 = ConvLevel(channels=300, height=3, level=2)
-
+        self.fixed_sum_matmul = FixedSumMatmul(feature_dim=9)
+        ###end###
     def _reset_parameters(self):
         # sampling_offsets
         init.constant_(self.sampling_offsets.weight, 0)
@@ -198,7 +200,8 @@ class MSDeformableAttention(nn.Module):
         lst_conv = [self.conv_level0, self.conv_level1, self.conv_level2]
         output = self.ms_deformable_attn_core(value, value_spatial_shapes,
                                               sampling_locations,
-                                              attention_weights, lst_conv)
+                                              attention_weights, lst_conv,
+                                              self.fixed_sum_matmul)
 
         output = self.output_proj(output)
 
@@ -443,8 +446,8 @@ class RTDETRTransformer(nn.Module):
         ])
 
         # init encoder output anchors and valid_mask
-        if self.eval_spatial_size:
-            self.anchors, self.valid_mask = self._generate_anchors()
+        #if self.eval_spatial_size:
+        #self.anchors, self.valid_mask = anchors, valid_mask  #self._generate_anchors()
 
         self._reset_parameters()
 
@@ -562,16 +565,21 @@ class RTDETRTransformer(nn.Module):
                            memory,
                            spatial_shapes,
                            denoising_class=None,
-                           denoising_bbox_unact=None):
+                           denoising_bbox_unact=None,
+                           anchors=None,
+                           valid_mask=None):
         bs, _, _ = memory.shape
         # prepare input for decoder
-        if self.training or self.eval_spatial_size is None:
-            anchors, valid_mask = self._generate_anchors(spatial_shapes,
-                                                         device=memory.device)
-        else:
-            anchors, valid_mask = self.anchors.to(
-                memory.device), self.valid_mask.to(memory.device)
-
+        ###was###
+        #if self.training or self.eval_spatial_size is None:
+        #    anchors, valid_mask = self._generate_anchors(spatial_shapes,
+        #                                                 device=memory.device)
+        #else:
+        #    anchors, valid_mask = self.anchors.to(
+        #        memory.device), self.valid_mask.to(memory.device)
+        ###now###
+        anchors, valid_mask = anchors, valid_mask
+        ###end###
         # memory = torch.where(valid_mask, memory, 0)
         memory = valid_mask.to(
             memory.dtype) * memory  # TODO fix type error for onnx export
@@ -630,7 +638,7 @@ class RTDETRTransformer(nn.Module):
         return target, reference_points_unact.detach(
         ), enc_topk_bboxes, enc_topk_logits
 
-    def forward(self, feats, targets=None):
+    def forward(self, feats, targets=None, anchors=None, valid_mask=None):
 
         # input projection and embedding
         (memory, spatial_shapes,
@@ -650,7 +658,7 @@ class RTDETRTransformer(nn.Module):
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
 
         target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits = \
-            self._get_decoder_input(memory, spatial_shapes, denoising_class, denoising_bbox_unact)
+            self._get_decoder_input(memory, spatial_shapes, denoising_class, denoising_bbox_unact, anchors,valid_mask)
 
         # decoder
         out_bboxes, out_logits = self.decoder(target,
